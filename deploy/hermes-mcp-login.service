@@ -1,0 +1,32 @@
+# systemd unit template — install as the agent's user (NOT root) so it shares
+# the agent's HERMES_HOME and token store. Co-location with the agent is
+# mandatory: both processes read/write the same ~/.hermes/mcp-tokens/.
+#
+# Run in the Hermes venv's Python so the `tools.mcp_oauth` / `mcp` imports
+# resolve. Adjust User, paths, and the EnvironmentFile to your deployment
+# (Ansible should template this).
+
+[Unit]
+Description=hermes-mcp-login — browser-triggered OAuth login for MCP servers
+After=network-online.target
+Wants=network-online.target
+
+[Service]
+Type=simple
+User=hermes
+Group=hermes
+EnvironmentFile=/home/hermes/.config/hermes-mcp-login/.env
+# Run inside the agent's venv interpreter (provides hermes-agent + mcp).
+ExecStart=/home/hermes/.hermes/hermes-agent/venv/bin/python -m hermes_mcp_login
+Restart=on-failure
+RestartSec=5
+
+# Hardening — the service only needs its own home + the token store.
+NoNewPrivileges=true
+ProtectSystem=strict
+ProtectHome=read-only
+ReadWritePaths=/home/hermes/.hermes
+PrivateTmp=true
+
+[Install]
+WantedBy=default.target

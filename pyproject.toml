@@ -1,0 +1,40 @@
+[build-system]
+requires = ["setuptools>=68"]
+build-backend = "setuptools.build_meta"
+
+[project]
+name = "hermes-mcp-login"
+version = "0.1.0"
+description = "Browser-triggered OAuth login for a Hermes agent's MCP servers — no SSH, no paste, no CLI."
+readme = "README.md"
+license = { text = "MIT" }
+requires-python = ">=3.11"
+authors = [{ name = "immeditech" }]
+keywords = ["hermes", "mcp", "oauth", "agent"]
+
+dependencies = [
+    # The agent itself. We import its own OAuth building blocks
+    # (HermesTokenStorage and the MCP SDK types it re-exports) so we drive
+    # *Hermes'* OAuth flow and write *Hermes'* token store — we never rebuild
+    # the token format. Installed from the agent's venv, not PyPI; see README.
+    "hermes-agent[mcp]",
+    "fastapi>=0.115",
+    "uvicorn[standard]>=0.30",
+    "pydantic>=2",
+]
+
+[project.optional-dependencies]
+dev = ["pytest>=8", "pytest-asyncio>=0.23", "httpx>=0.27", "ruff>=0.6"]
+
+[project.scripts]
+hermes-mcp-login = "hermes_mcp_login.__main__:main"
+
+[project.urls]
+Homepage = "https://github.com/immeditech/hermes-mcp-login"
+
+[tool.setuptools.packages.find]
+where = ["src"]
+
+[tool.ruff]
+line-length = 100
+target-version = "py311"
