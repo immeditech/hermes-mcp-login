@@ -68,9 +68,12 @@ The two OAuth handlers are coupled to the two HTTP requests by a pair of
   `~/.hermes/hermes-agent/venv/bin/python -m hermes_mcp_login`) so `hermes-agent`
   and `mcp` resolve. `hermes-agent` is not on PyPI — it's already installed in
   that venv; this package just imports from it.
-- **Behind a reverse proxy.** Bind loopback (default `127.0.0.1:9120`); let the
-  proxy (e.g. HAProxy) terminate TLS for `<public_base>` and forward to the
-  service. Firewall the port so it's reachable only via the proxy.
+- **Behind a reverse proxy.** Let the proxy (e.g. HAProxy) terminate TLS for
+  `<public_base>` and forward to the service (default port `9120`). Bind
+  `127.0.0.1` only if the proxy runs on the **same host**; if it's a **central
+  proxy on another host**, set `HERMES_MCP_LOGIN_HOST=0.0.0.0` (or the host IP)
+  and firewall the port so only the proxy can reach it — otherwise the proxy
+  gets "connection refused".
 - A `systemd` unit template is in [`deploy/hermes-mcp-login.service`](deploy/hermes-mcp-login.service).
 
 ### Install
