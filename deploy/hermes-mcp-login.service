@@ -1,32 +1,32 @@
-# systemd unit template — install as the agent's user (NOT root) so it shares
-# the agent's HERMES_HOME and token store. Co-location with the agent is
-# mandatory: both processes read/write the same ~/.hermes/mcp-tokens/.
-#
-# Run in the Hermes venv's Python so the `tools.mcp_oauth` / `mcp` imports
-# resolve. Adjust User, paths, and the EnvironmentFile to your deployment
-# (Ansible should template this).
+# systemd unit — install as a SYSTEM unit (/etc/systemd/system/), runs as the
+# agent's user so it shares HERMES_HOME and the token store. Co-location with
+# the agent is mandatory: both processes read/write the same
+# ~/.hermes/mcp-tokens/. Modelled on the existing hermes-dashboard.service so
+# Ansible can template both the same way (User, HERMES_HOME, XDG_RUNTIME_DIR,
+# EnvironmentFile). Adjust the uid in user@<uid>.service / XDG_RUNTIME_DIR and
+# the paths to your deployment.
 
 [Unit]
 Description=hermes-mcp-login — browser-triggered OAuth login for MCP servers
-After=network-online.target
+After=network-online.target user@1001.service
 Wants=network-online.target
 
 [Service]
 Type=simple
 User=hermes
 Group=hermes
-EnvironmentFile=/home/hermes/.config/hermes-mcp-login/.env
+WorkingDirectory=/home/hermes/.hermes
+Environment=HERMES_HOME=/home/hermes/.hermes
+Environment=PYTHONUNBUFFERED=1
+Environment=HOME=/home/hermes
+Environment=XDG_RUNTIME_DIR=/run/user/1001
+# Service knobs (HERMES_MCP_LOGIN_*); see .env.example. For a central reverse
+# proxy on another host, set HERMES_MCP_LOGIN_HOST=0.0.0.0 + firewall the port.
+EnvironmentFile=/home/hermes/.hermes/hermes-mcp-login.env
 # Run inside the agent's venv interpreter (provides hermes-agent + mcp).
 ExecStart=/home/hermes/.hermes/hermes-agent/venv/bin/python -m hermes_mcp_login
 Restart=on-failure
-RestartSec=5
-
-# Hardening — the service only needs its own home + the token store.
-NoNewPrivileges=true
-ProtectSystem=strict
-ProtectHome=read-only
-ReadWritePaths=/home/hermes/.hermes
-PrivateTmp=true
+RestartSec=10
 
 [Install]
-WantedBy=default.target
+WantedBy=multi-user.target
