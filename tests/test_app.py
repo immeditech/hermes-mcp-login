@@ -53,7 +53,7 @@ def test_login_unknown_server(client):
 
 
 def test_login_redirects_to_authorize_url(client, monkeypatch):
-    async def fake_drive_login(cfg, sess):
+    async def fake_drive_login(cfg, sess, **kwargs):
         # Stand in for the provider's redirect_handler.
         sess.authorize_url.set_result("https://idp.example.test/authorize?state=abc")
         hermes.SESSIONS["abc"] = sess
@@ -64,29 +64,33 @@ def test_login_redirects_to_authorize_url(client, monkeypatch):
     assert resp.headers["location"].startswith("https://idp.example.test/authorize")
 
 
-def test_plain_login_does_not_wipe_tokens(client, monkeypatch):
-    wiped = []
-    monkeypatch.setattr(hermes, "wipe_tokens", lambda name: wiped.append(name))
+def test_login_passes_force_through(client, monkeypatch):
+    seen = {}
 
-    async def fake_drive_login(cfg, sess):
+    async def fake_drive_login(cfg, sess, *, force=False, provider_timeout=300.0):
+        seen["force"] = force
         sess.authorize_url.set_result("https://idp.example.test/authorize?state=abc")
 
     monkeypatch.setattr(hermes, "drive_login", fake_drive_login)
+
     client.get("/mcp/imcontact/login")
-    assert wiped == []
-
-
-def test_force_login_wipes_tokens_first(client, monkeypatch):
-    wiped = []
-    monkeypatch.setattr(hermes, "wipe_tokens", lambda name: wiped.append(name))
-
-    async def fake_drive_login(cfg, sess):
-        sess.authorize_url.set_result("https://idp.example.test/authorize?state=abc")
-
-    monkeypatch.setattr(hermes, "drive_login", fake_drive_login)
+    assert seen["force"] is False
     resp = client.get("/mcp/imcontact/login", params={"force": "true"})
     assert resp.status_code == 302
-    assert wiped == ["imcontact"]
+    assert seen["force"] is True
+
+
+def test_login_refuses_cross_site(client, monkeypatch):
+    called = []
+
+    async def fake_drive_login(cfg, sess, **kwargs):
+        called.append(True)
+        sess.authorize_url.set_result("https://idp.example.test/authorize?state=abc")
+
+    monkeypatch.setattr(hermes, "drive_login", fake_drive_login)
+    resp = client.get("/mcp/imcontact/login", headers={"sec-fetch-site": "cross-site"})
+    assert resp.status_code == 403
+    assert called == []  # flow never started
 
 
 def test_index_reauth_link_forces(client, monkeypatch):
@@ -94,6 +98,13 @@ def test_index_reauth_link_forces(client, monkeypatch):
     resp = client.get("/")
     assert "/mcp/imcontact/login?force=true" in resp.text
     assert ">re-auth<" in resp.text
+
+
+def test_index_renders_status_banner(client):
+    resp = client.get("/", params={"status": "fail", "server": "imcontact",
+                                    "detail": "boom <x>"})
+    assert "login failed" in resp.text
+    assert "boom &lt;x&gt;" in resp.text  # detail is HTML-escaped at render
 
 
 def test_callback_unknown_state(client):

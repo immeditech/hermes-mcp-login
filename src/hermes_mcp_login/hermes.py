@@ -1,13 +1,16 @@
 """Bridge to the Hermes agent's own OAuth machinery.
 
 This is the only module that imports Hermes/MCP-SDK internals. It deliberately
-keeps the surface small and stable:
+keeps the surface small; what it touches (re-verify on a Hermes upgrade):
 
-* ``HermesTokenStorage`` — the agent's documented token store (we write *its*
-  format, atomically, ``0o600``); the running agent's disk-watch reload picks up
-  the fresh token on the next tool call. No restart, no IPC.
-* the MCP SDK's ``OAuthClientProvider`` / metadata / client-info types.
-* the streamable-HTTP client + ``ClientSession`` used to open a connection.
+* ``tools.mcp_oauth.HermesTokenStorage`` — the agent's token store (we write
+  *its* format, atomically, ``0o600``); the running agent's disk-watch reload
+  picks up the fresh token on the next tool call. No restart, no IPC.
+* ``hermes_cli.mcp_config._get_mcp_servers`` — reads ``mcp_servers`` from the
+  agent's ``config.yaml``. Private (leading underscore); there is no public
+  accessor, so this is the one fragile import.
+* the MCP SDK's ``OAuthClientProvider`` / metadata / client-info types, the
+  streamable-HTTP + SSE clients, and ``ClientSession``.
 
 We build the client metadata and pre-register the client **inline** rather than
 calling Hermes' private ``_build_client_metadata`` / ``_maybe_preregister_client``
@@ -114,16 +117,38 @@ def token_present(name: str) -> bool:
     return storage_cls(name).has_cached_tokens()
 
 
-def wipe_tokens(name: str) -> None:
-    """Delete all stored OAuth state (tokens, client info, metadata) for a server.
+class _ForceReauthStorage:
+    """Token-storage wrapper that reports *no* cached token, forcing a fresh
+    browser flow — without destroying the existing one.
 
-    Used by the forced re-auth path: a cached token short-circuits the flow
-    (the server answers 200, never the 401 that triggers a browser login), so a
-    deliberate re-auth must clear it first. The running agent reconnects with
-    the freshly written token on its next tool call via disk-watch reload.
+    A valid cached token short-circuits the OAuth flow (the server answers 200,
+    so the 401 that starts the browser login never fires). The obvious fix —
+    deleting the token first — is unsafe: if the user abandons the re-auth, the
+    agent is left with no credentials, and a destructive GET is CSRF-able. This
+    wrapper instead makes ``get_tokens`` return ``None`` so the SDK runs the full
+    flow, while every write still goes to the real storage. The old token stays
+    on disk and is overwritten only when (and if) a new one is obtained.
+
+    ``wrote_tokens`` records whether the flow actually produced a new token, so
+    the caller can tell a completed re-auth from an abandoned one (where the old
+    token would otherwise still satisfy ``has_cached_tokens``).
     """
-    storage_cls = _load_token_storage()
-    storage_cls(name).remove()
+
+    def __init__(self, inner: Any):
+        self._inner = inner
+        self.wrote_tokens = False
+
+    async def get_tokens(self):
+        return None
+
+    async def set_tokens(self, tokens) -> None:
+        await self._inner.set_tokens(tokens)
+        self.wrote_tokens = True
+
+    def __getattr__(self, item):
+        # Delegate everything else (client info, metadata, paths, remove, …) to
+        # the wrapped HermesTokenStorage so writes land in the real token store.
+        return getattr(self._inner, item)
 
 
 # ---------------------------------------------------------------------------
@@ -146,6 +171,9 @@ class LoginSession:
     code_result: asyncio.Future
     task: asyncio.Task | None = None
     error: BaseException | None = None
+    # OAuth ``state`` this session was registered under in SESSIONS, so the
+    # driver can remove its own entry when the flow ends (success or abandon).
+    state: str | None = None
 
 
 # Live sessions keyed by OAuth ``state`` so the stateless ``/callback`` request
@@ -222,13 +250,26 @@ def _persist_oauth_metadata(provider, storage) -> None:
         logger.info("Persisted OAuth metadata (token_endpoint=%s)", meta.token_endpoint)
 
 
-async def drive_login(server_cfg: dict, sess: LoginSession) -> None:
+async def drive_login(
+    server_cfg: dict,
+    sess: LoginSession,
+    *,
+    force: bool = False,
+    provider_timeout: float = 300.0,
+) -> None:
     """Open an MCP connection so the provider fires the OAuth flow on the 401.
 
     Runs as a background task across ``/login`` and ``/callback``. The two
     handlers below bridge the provider's callbacks to ``sess``'s two futures;
     ``session.initialize()`` triggers the 401 → authorize → token-exchange →
     ``storage.set_tokens`` chain, after which the token is on disk.
+
+    With ``force=True`` (re-auth) the provider is given a storage wrapper that
+    hides any cached token so the browser flow runs even when a valid token
+    already exists — non-destructively (see :class:`_ForceReauthStorage`).
+    ``provider_timeout`` bounds how long the provider waits for the browser
+    callback. This coroutine never raises: outcomes are reported via
+    ``sess.error`` (and ``sess.authorize_url`` for pre-redirect failures).
     """
     import httpx
 
@@ -240,7 +281,10 @@ async def drive_login(server_cfg: dict, sess: LoginSession) -> None:
     oauth_cfg = dict(server_cfg.get("oauth") or {})
     redirect_uri = sess.redirect_uri
 
-    storage = storage_cls(name)
+    real_storage = storage_cls(name)
+    # For re-auth, the provider talks to a wrapper that reports no cached token;
+    # all writes still land in real_storage. For a first login they're the same.
+    storage = _ForceReauthStorage(real_storage) if force else real_storage
     metadata = _build_metadata(sdk, oauth_cfg, redirect_uri)
     await _preregister_client(sdk, storage, oauth_cfg, metadata, redirect_uri)
 
@@ -249,6 +293,7 @@ async def drive_login(server_cfg: dict, sess: LoginSession) -> None:
         # then hand the authorize URL to the waiting /login request.
         state = parse_qs(urlparse(authorization_url).query).get("state", [None])[0]
         if state:
+            sess.state = state
             SESSIONS[state] = sess
         if not sess.authorize_url.done():
             sess.authorize_url.set_result(authorization_url)
@@ -262,7 +307,7 @@ async def drive_login(server_cfg: dict, sess: LoginSession) -> None:
         storage=storage,
         redirect_handler=redirect_handler,
         callback_handler=callback_handler,
-        timeout=float(oauth_cfg.get("timeout", 300)),
+        timeout=provider_timeout,
     )
 
     # ``ssl_verify`` is a TOP-LEVEL server key (not under ``oauth:``) — it may be
@@ -339,30 +384,40 @@ async def drive_login(server_cfg: dict, sess: LoginSession) -> None:
         connect_error = exc
         logger.warning("MCP connect for '%s' raised (token may still be saved): %s", name, exc)
 
+    finally:
+        # Always drop our own SESSIONS entry — otherwise abandoned/timed-out
+        # logins (where /callback never fires) leak the dict forever.
+        if sess.state is not None:
+            SESSIONS.pop(sess.state, None)
+
     # Metadata is discovered during the auth flow and lives on the provider
     # context even if the post-auth initialize failed — persist it defensively
     # so the agent can cold-refresh (needs <name>.meta.json for the token URL).
     try:
-        _persist_oauth_metadata(provider, storage)
+        _persist_oauth_metadata(provider, real_storage)
     except Exception:  # noqa: BLE001 - never let metadata persistence fail the login
         logger.exception("Persisting OAuth metadata for '%s' failed", name)
 
-    if storage.has_cached_tokens():
+    # Success = a token was obtained. For re-auth we must check that *this* flow
+    # wrote a new token (the old one would still satisfy has_cached_tokens); for
+    # a first login, a token file on disk is enough.
+    succeeded = storage.wrote_tokens if force else real_storage.has_cached_tokens()
+    if succeeded:
         if connect_error is not None:
             logger.info(
                 "MCP OAuth login for '%s' succeeded (token written) despite a "
                 "post-auth session error", name,
             )
+        sess.error = None
         return
 
-    # No token on disk → a real failure. Surface it to the waiting requests.
+    # No token obtained → a real failure. Record it (this coroutine never
+    # raises, so an abandoned task doesn't emit "exception never retrieved");
+    # surface pre-redirect failures to a still-waiting /login.
     err = connect_error or RuntimeError(
         f"MCP OAuth login for '{name}' finished without a cached token"
     )
     sess.error = err
-    if not sess.code_result.done():
-        sess.code_result.set_exception(err)
     if not sess.authorize_url.done():
         sess.authorize_url.set_exception(err)
     logger.error("MCP OAuth login for '%s' failed: %s", name, err)
-    raise err

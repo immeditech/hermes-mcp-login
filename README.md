@@ -126,12 +126,17 @@ Token files are written `0o600` under a `0o700` parent by Hermes'
 
 ## Coupling to Hermes internals
 
-The only Hermes import is `HermesTokenStorage` (the agent's documented token
-store) plus MCP SDK types. Client metadata and client pre-registration are built
+All Hermes/SDK coupling lives in one module (`hermes.py`). It imports:
+
+- `tools.mcp_oauth.HermesTokenStorage` — the agent's token store, and
+- `hermes_cli.mcp_config._get_mcp_servers` — reads `mcp_servers` from
+  `config.yaml` (a **private** helper; no public accessor exists),
+
+plus MCP SDK types. Client metadata and client pre-registration are built
 **inline** here rather than calling Hermes' private helpers, so the service is
-independent of the fork's `redirect_uri` patch and resilient to internal
-signature drift. On a Hermes upgrade, verify only that `HermesTokenStorage` and
-the `mcp` SDK provider/types still match.
+independent of the fork's `redirect_uri` patch and resilient to that drift. On a
+Hermes upgrade, re-verify `HermesTokenStorage`, `_get_mcp_servers`, and the `mcp`
+SDK provider/types still match.
 
 ## Development
 
