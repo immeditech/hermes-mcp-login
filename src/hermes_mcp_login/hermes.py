@@ -114,6 +114,18 @@ def token_present(name: str) -> bool:
     return storage_cls(name).has_cached_tokens()
 
 
+def wipe_tokens(name: str) -> None:
+    """Delete all stored OAuth state (tokens, client info, metadata) for a server.
+
+    Used by the forced re-auth path: a cached token short-circuits the flow
+    (the server answers 200, never the 401 that triggers a browser login), so a
+    deliberate re-auth must clear it first. The running agent reconnects with
+    the freshly written token on its next tool call via disk-watch reload.
+    """
+    storage_cls = _load_token_storage()
+    storage_cls(name).remove()
+
+
 # ---------------------------------------------------------------------------
 # Login session — couples the two OAuth handlers to the two HTTP requests
 # ---------------------------------------------------------------------------

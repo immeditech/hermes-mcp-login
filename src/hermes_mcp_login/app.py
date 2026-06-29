@@ -45,7 +45,7 @@ def create_app(settings: Settings | None = None) -> FastAPI:
         return _render_index()
 
     @app.get("/mcp/{name}/login")
-    async def login(name: str):
+    async def login(name: str, force: bool = False):
         try:
             cfg = hermes.get_server_cfg(name)
         except KeyError:
@@ -55,6 +55,12 @@ def create_app(settings: Settings | None = None) -> FastAPI:
             redirect_uri = settings.redirect_uri(name)
         except RuntimeError as exc:
             return _problem(str(exc), 500)
+
+        # Re-auth: a valid cached token makes the server answer 200 instead of
+        # the 401 that starts the browser flow, so a forced re-auth must clear
+        # the stored token first. (Plain ``/login`` is for the first login.)
+        if force:
+            hermes.wipe_tokens(name)
 
         loop = asyncio.get_running_loop()
         sess = hermes.LoginSession(
@@ -139,11 +145,14 @@ def _render_index() -> str:
     for name in sorted(servers):
         present = hermes.token_present(name)
         badge = "✅ token present" if present else "— no token"
+        # When a token already exists, the action is a forced re-auth (wipe +
+        # fresh browser login); otherwise a plain first login.
+        safe = html.escape(name)
+        href = f"/mcp/{safe}/login?force=true" if present else f"/mcp/{safe}/login"
         rows.append(
-            f"<tr><td><code>{html.escape(name)}</code></td>"
+            f"<tr><td><code>{safe}</code></td>"
             f"<td>{badge}</td>"
-            f'<td><a href="/mcp/{html.escape(name)}/login">'
-            f'{"re-auth" if present else "login"}</a></td></tr>'
+            f'<td><a href="{href}">{"re-auth" if present else "login"}</a></td></tr>'
         )
     body = "\n".join(rows) or '<tr><td colspan="3"><em>no OAuth MCP servers configured</em></td></tr>'
     return (

@@ -56,6 +56,7 @@ The two OAuth handlers are coupled to the two HTTP requests by a pair of
 |-------|---------|
 | `GET /` | index: configured OAuth MCP servers + login / re-auth links |
 | `GET /mcp/<name>/login` | start a login, `302` to the IdP authorize URL |
+| `GET /mcp/<name>/login?force=true` | re-auth: wipe the stored token first, then log in (a valid token would otherwise short-circuit the flow) |
 | `GET /mcp/<name>/callback?code&state` | the registered `redirect_uri`; token exchange, `302` back to `/` |
 | `GET /mcp/<name>/status` | JSON `{ "token_present": bool }` |
 
