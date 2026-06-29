@@ -92,13 +92,19 @@ one source of truth:
 ```yaml
 mcp_servers:
   imcontact:
-    url: "https://contact.example.com/mcp/"
+    url: "https://contact.example.com/mcp/sse"
+    transport: sse                                      # omit for streamable HTTP
     auth: oauth
     ssl_verify: "/etc/ssl/certs/ca-certificates.crt"   # path or true/false
     oauth:
       client_id: "contact"                              # pre-registered → skips DCR
-      scope: "openid profile email offline_access"
+      scope: "openid profile email offline_access"      # offline_access → refresh token
 ```
+
+The service drives the OAuth flow over the **same transport the agent uses**: it
+honours the server's `transport: sse` (GET stream + POST messages) and falls
+back to streamable HTTP otherwise — so the `401` challenge is triggered the same
+way the agent would. TLS (`ssl_verify`) is applied to both transports.
 
 The `redirect_uri` is derived as `<HERMES_MCP_LOGIN_PUBLIC_BASE>/mcp/<name>/callback`
 and must be registered as a **Valid Redirect URI** at the IdP.

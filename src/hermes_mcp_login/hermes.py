@@ -63,6 +63,14 @@ def _load_sdk():
 
         new_http = False
 
+    # SSE transport — for servers that implement the SSE protocol (GET stream +
+    # POST messages) instead of streamable HTTP. Optional; only needed when a
+    # server sets ``transport: sse``.
+    try:
+        from mcp.client.sse import sse_client
+    except ImportError:  # pragma: no cover - depends on installed SDK
+        sse_client = None
+
     return {
         "ClientSession": ClientSession,
         "OAuthClientProvider": OAuthClientProvider,
@@ -70,6 +78,7 @@ def _load_sdk():
         "OAuthClientMetadata": OAuthClientMetadata,
         "AnyUrl": AnyUrl,
         "streamable_http_client": streamable_http_client,
+        "sse_client": sse_client,
         "new_http": new_http,
     }
 
@@ -249,8 +258,12 @@ async def drive_login(server_cfg: dict, sess: LoginSession) -> None:
     verify = server_cfg.get("ssl_verify", True)
     connect_timeout = float(server_cfg.get("connect_timeout", 60))
 
-    streamable = sdk["streamable_http_client"]
     ClientSession = sdk["ClientSession"]
+    # Match the transport the agent uses for this server, so the OAuth flow is
+    # triggered the same way. SSE servers (GET stream + POST messages) return
+    # the 401 challenge on the GET; driving them with the streamable-HTTP POST
+    # would hit 404/405 instead and never start the flow.
+    transport = server_cfg.get("transport")
 
     # Drive the connect so the 401 fires the OAuth flow. We only care that the
     # flow runs far enough to exchange the code and write the token — the
@@ -260,7 +273,38 @@ async def drive_login(server_cfg: dict, sess: LoginSession) -> None:
     # not by a clean initialize().
     connect_error: BaseException | None = None
     try:
-        if sdk["new_http"]:
+        if transport == "sse":
+            sse_client = sdk["sse_client"]
+            if sse_client is None:  # pragma: no cover - depends on installed SDK
+                raise RuntimeError(
+                    f"server '{name}' uses transport: sse but mcp.client.sse "
+                    "is not available in this SDK"
+                )
+
+            # sse_client takes no verify/cert kwargs — route TLS settings
+            # through an httpx_client_factory, mirroring tools/mcp_tool.py.
+            def _sse_http_factory(headers=None, timeout=None, auth=None):
+                kw: dict = {
+                    "follow_redirects": True,
+                    "verify": verify,
+                    "timeout": timeout or httpx.Timeout(connect_timeout, read=300.0),
+                }
+                if headers is not None:
+                    kw["headers"] = headers
+                if auth is not None:
+                    kw["auth"] = auth
+                return httpx.AsyncClient(**kw)
+
+            async with sse_client(
+                url=url,
+                timeout=connect_timeout,
+                sse_read_timeout=300.0,
+                auth=provider,
+                httpx_client_factory=_sse_http_factory,
+            ) as (read, write):
+                async with ClientSession(read, write) as session:
+                    await session.initialize()  # ← drives the OAuth flow
+        elif sdk["new_http"]:
             client_kwargs = {
                 "follow_redirects": True,
                 "timeout": httpx.Timeout(connect_timeout, read=300.0),
@@ -268,15 +312,15 @@ async def drive_login(server_cfg: dict, sess: LoginSession) -> None:
                 "auth": provider,
             }
             async with httpx.AsyncClient(**client_kwargs) as http_client:
-                async with streamable(url, http_client=http_client) as (read, write, _sid):
+                async with sdk["streamable_http_client"](url, http_client=http_client) as (
+                    read, write, _sid,
+                ):
                     async with ClientSession(read, write) as session:
                         await session.initialize()  # ← drives the OAuth flow
         else:  # pragma: no cover - legacy SDK
-            async with streamable(url, timeout=connect_timeout, verify=verify, auth=provider) as (
-                read,
-                write,
-                _sid,
-            ):
+            async with sdk["streamable_http_client"](
+                url, timeout=connect_timeout, verify=verify, auth=provider
+            ) as (read, write, _sid):
                 async with ClientSession(read, write) as session:
                     await session.initialize()
     except BaseException as exc:  # noqa: BLE001 - evaluated against token presence below
