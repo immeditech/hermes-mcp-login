@@ -183,6 +183,24 @@ async def _preregister_client(sdk: dict, storage, oauth_cfg: dict, metadata, red
     await storage.set_client_info(client_info)
 
 
+def _persist_oauth_metadata(provider, storage) -> None:
+    """Write the discovered OAuth server metadata to ``<name>.meta.json``.
+
+    The raw SDK ``OAuthClientProvider`` discovers the authorization-server
+    metadata during the flow but keeps it in memory only — only Hermes'
+    ``HermesMCPOAuthProvider`` persists it. Without the on-disk metadata, the
+    agent's next cold token refresh has no token endpoint and falls back to the
+    SDK's guessed ``{server_url}/token`` → 404/405 → a full browser re-auth.
+    Mirrors ``HermesMCPOAuthProvider._persist_oauth_metadata_if_changed`` so the
+    on-disk state matches exactly what the running agent expects.
+    """
+    ctx = getattr(provider, "context", None)
+    meta = getattr(ctx, "oauth_metadata", None) if ctx is not None else None
+    if meta is not None:
+        storage.save_oauth_metadata(meta)
+        logger.info("Persisted OAuth metadata (token_endpoint=%s)", meta.token_endpoint)
+
+
 async def drive_login(server_cfg: dict, sess: LoginSession) -> None:
     """Open an MCP connection so the provider fires the OAuth flow on the 401.
 
@@ -254,6 +272,7 @@ async def drive_login(server_cfg: dict, sess: LoginSession) -> None:
             ):
                 async with ClientSession(read, write) as session:
                     await session.initialize()
+        _persist_oauth_metadata(provider, storage)
     except BaseException as exc:  # noqa: BLE001 - surfaced to /callback and /login
         sess.error = exc
         if not sess.code_result.done():
