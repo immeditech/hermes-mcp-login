@@ -146,7 +146,7 @@ def create_app(settings: Settings | None = None) -> FastAPI:
         if _is_cross_site(request):
             return _problem("cross-site request refused", 403)
         ok, detail = await control.restart_gateway(
-            settings.gateway_service, settings.gateway_restart_timeout
+            settings.gateway_restart_command, settings.gateway_restart_timeout
         )
         params = {"gw": "ok" if ok else "fail"}
         if not ok and detail:
@@ -227,8 +227,7 @@ def _render_index(query, gateway_restart_enabled: bool = False) -> str:
     # a cross-site GET / prefetch; pairs with the Sec-Fetch-Site guard.
     gw_button = (
         '<form method="post" action="/gateway/restart" style="margin-top:1em">'
-        '<button type="submit">Restart agent gateway</button>'
-        '<small> — needed once after a server\'s first login</small></form>'
+        '<button type="submit">Restart agent gateway</button></form>'
         if gateway_restart_enabled else ""
     )
     return (

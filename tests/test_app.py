@@ -143,7 +143,8 @@ def test_callback_handler_couples_to_code_result():
 
 GW_SETTINGS = Settings(
     public_base="https://agent.example.test", authorize_timeout=2.0,
-    gateway_restart_enabled=True, gateway_service="hermes-gateway.service",
+    gateway_restart_enabled=True,
+    gateway_restart_command="sudo -n systemctl restart hermes-gateway.service",
 )
 
 
@@ -172,8 +173,8 @@ def test_restart_refuses_cross_site(gw_client, monkeypatch):
     from hermes_mcp_login import control
     called = []
 
-    async def fake(service, timeout):
-        called.append(service)
+    async def fake(command, timeout):
+        called.append(command)
         return True, ""
 
     monkeypatch.setattr(control, "restart_gateway", fake)
@@ -185,8 +186,8 @@ def test_restart_refuses_cross_site(gw_client, monkeypatch):
 def test_restart_ok_redirects(gw_client, monkeypatch):
     from hermes_mcp_login import control
 
-    async def fake(service, timeout):
-        assert service == "hermes-gateway.service"
+    async def fake(command, timeout):
+        assert "systemctl" in command
         return True, ""
 
     monkeypatch.setattr(control, "restart_gateway", fake)
@@ -198,7 +199,7 @@ def test_restart_ok_redirects(gw_client, monkeypatch):
 def test_restart_failure_carries_detail(gw_client, monkeypatch):
     from hermes_mcp_login import control
 
-    async def fake(service, timeout):
+    async def fake(command, timeout):
         return False, "a sudo rule is required"
 
     monkeypatch.setattr(control, "restart_gateway", fake)

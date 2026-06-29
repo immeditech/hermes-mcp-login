@@ -1,39 +1,41 @@
 """Agent-gateway control — restart the co-located Hermes gateway.
 
-Separate from the OAuth bridge: this is plain service control via ``systemctl``,
-used by the optional "restart gateway" button. It relies on a sudoers rule that
-lets the service user run exactly ``systemctl restart <service>`` — the service
-itself holds no extra privilege.
+Separate from the OAuth bridge: this is plain service control, used by the
+optional "restart gateway" button. The command is configurable (see
+``Settings.gateway_restart_command``); the default
+``sudo -n systemctl restart hermes-gateway.service`` relies on a sudoers rule
+that grants exactly that — the service itself holds no extra privilege.
 
-Why a restart helps: the agent only re-probes an MCP server it abandoned at
-startup (e.g. a first login, where no token existed yet) after a gateway
-restart; the disk-watch reload refreshes tokens for *connected* servers but does
-not re-establish a connection that failed the initial OAuth gate.
+A *full* restart is what makes the agent re-probe its MCP servers (the
+disk-watch reload only refreshes tokens for already-connected servers).
 """
 
 from __future__ import annotations
 
 import asyncio
 import logging
+import shlex
 
 logger = logging.getLogger(__name__)
 
 
-async def restart_gateway(service: str, timeout: float) -> tuple[bool, str]:
-    """Run ``sudo systemctl restart <service>``. Returns ``(ok, detail)``.
-
-    ``detail`` carries stderr (or a timeout/exec note) on failure so the caller
-    can surface a useful message. Never raises.
+async def restart_gateway(command: str, timeout: float) -> tuple[bool, str]:
+    """Run *command* (a shell-style string, split with shlex). Returns
+    ``(ok, detail)``; ``detail`` carries stderr / a timeout note on failure.
+    Never raises.
     """
+    argv = shlex.split(command)
+    if not argv:
+        return False, "empty restart command"
     try:
         proc = await asyncio.create_subprocess_exec(
-            "sudo", "-n", "systemctl", "restart", service,
+            *argv,
             stdout=asyncio.subprocess.PIPE,
             stderr=asyncio.subprocess.PIPE,
         )
-    except OSError as exc:  # sudo/systemctl missing
-        logger.exception("restart_gateway: could not exec sudo/systemctl")
-        return False, f"could not run systemctl: {exc}"
+    except OSError as exc:
+        logger.exception("restart_gateway: could not exec %r", argv[0])
+        return False, f"could not run {argv[0]!r}: {exc}"
 
     try:
         _out, err = await asyncio.wait_for(proc.communicate(), timeout=timeout)
@@ -42,8 +44,8 @@ async def restart_gateway(service: str, timeout: float) -> tuple[bool, str]:
         return False, f"timed out after {timeout:.0f}s"
 
     if proc.returncode == 0:
-        logger.info("Gateway service %s restarted", service)
+        logger.info("Gateway restart command succeeded: %s", command)
         return True, ""
     detail = (err or b"").decode(errors="replace").strip() or f"exit {proc.returncode}"
-    logger.warning("restart_gateway failed for %s: %s", service, detail)
+    logger.warning("Gateway restart command failed (%s): %s", command, detail)
     return False, detail
