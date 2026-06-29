@@ -252,6 +252,13 @@ async def drive_login(server_cfg: dict, sess: LoginSession) -> None:
     streamable = sdk["streamable_http_client"]
     ClientSession = sdk["ClientSession"]
 
+    # Drive the connect so the 401 fires the OAuth flow. We only care that the
+    # flow runs far enough to exchange the code and write the token — the
+    # subsequent MCP `initialize()` round-trip is the agent's job, not ours, and
+    # can hiccup independently (e.g. streamable-HTTP "Session terminated"/404 on
+    # the post-auth retry). So success is defined by the token landing on disk,
+    # not by a clean initialize().
+    connect_error: BaseException | None = None
     try:
         if sdk["new_http"]:
             client_kwargs = {
@@ -272,12 +279,34 @@ async def drive_login(server_cfg: dict, sess: LoginSession) -> None:
             ):
                 async with ClientSession(read, write) as session:
                     await session.initialize()
+    except BaseException as exc:  # noqa: BLE001 - evaluated against token presence below
+        connect_error = exc
+        logger.warning("MCP connect for '%s' raised (token may still be saved): %s", name, exc)
+
+    # Metadata is discovered during the auth flow and lives on the provider
+    # context even if the post-auth initialize failed — persist it defensively
+    # so the agent can cold-refresh (needs <name>.meta.json for the token URL).
+    try:
         _persist_oauth_metadata(provider, storage)
-    except BaseException as exc:  # noqa: BLE001 - surfaced to /callback and /login
-        sess.error = exc
-        if not sess.code_result.done():
-            sess.code_result.set_exception(exc)
-        if not sess.authorize_url.done():
-            sess.authorize_url.set_exception(exc)
-        logger.exception("MCP OAuth login for '%s' failed", name)
-        raise
+    except Exception:  # noqa: BLE001 - never let metadata persistence fail the login
+        logger.exception("Persisting OAuth metadata for '%s' failed", name)
+
+    if storage.has_cached_tokens():
+        if connect_error is not None:
+            logger.info(
+                "MCP OAuth login for '%s' succeeded (token written) despite a "
+                "post-auth session error", name,
+            )
+        return
+
+    # No token on disk → a real failure. Surface it to the waiting requests.
+    err = connect_error or RuntimeError(
+        f"MCP OAuth login for '{name}' finished without a cached token"
+    )
+    sess.error = err
+    if not sess.code_result.done():
+        sess.code_result.set_exception(err)
+    if not sess.authorize_url.done():
+        sess.authorize_url.set_exception(err)
+    logger.error("MCP OAuth login for '%s' failed: %s", name, err)
+    raise err
