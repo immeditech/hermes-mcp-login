@@ -36,7 +36,11 @@ def create_app(settings: Settings | None = None) -> FastAPI:
     settings = settings or Settings.from_env()
     app = FastAPI(title="hermes-mcp-login", version="0.1.0")
 
-    @app.get("/", response_class=HTMLResponse)
+    # GET renders the index; HEAD is what reverse-proxy health checks hit
+    # (e.g. HAProxy `option httpchk HEAD /`). Without HEAD the route returns
+    # 405 and the proxy marks the backend down → 503. Starlette strips the
+    # body for HEAD automatically.
+    @app.api_route("/", methods=["GET", "HEAD"], response_class=HTMLResponse)
     async def index() -> str:
         return _render_index()
 
