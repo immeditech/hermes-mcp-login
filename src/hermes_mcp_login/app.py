@@ -34,7 +34,7 @@ from urllib.parse import urlencode
 from fastapi import FastAPI, Request
 from fastapi.responses import HTMLResponse, JSONResponse, RedirectResponse
 
-from . import hermes
+from . import control, hermes
 from .config import Settings
 
 logger = logging.getLogger(__name__)
@@ -54,7 +54,7 @@ def create_app(settings: Settings | None = None) -> FastAPI:
     # body for HEAD automatically.
     @app.api_route("/", methods=["GET", "HEAD"], response_class=HTMLResponse)
     async def index(request: Request) -> str:
-        return _render_index(request.query_params)
+        return _render_index(request.query_params, settings.gateway_restart_enabled)
 
     @app.get("/mcp/{name}/login")
     async def login(name: str, request: Request, force: bool = False):
@@ -137,6 +137,22 @@ def create_app(settings: Settings | None = None) -> FastAPI:
             return _problem(f"unknown OAuth MCP server: {name!r}", 404)
         return JSONResponse({"name": name, "token_present": hermes.token_present(name)})
 
+    # Optional: restart the agent gateway (POST — state-changing, CSRF-guarded).
+    # Picks up a server whose first-login token landed after the gateway started.
+    @app.post("/gateway/restart")
+    async def gateway_restart(request: Request):
+        if not settings.gateway_restart_enabled:
+            return _problem("gateway restart is disabled", 404)
+        if _is_cross_site(request):
+            return _problem("cross-site request refused", 403)
+        ok, detail = await control.restart_gateway(
+            settings.gateway_service, settings.gateway_restart_timeout
+        )
+        params = {"gw": "ok" if ok else "fail"}
+        if not ok and detail:
+            params["detail"] = detail
+        return RedirectResponse(f"/?{urlencode(params)}", status_code=303)
+
     return app
 
 
@@ -170,17 +186,24 @@ def _result_redirect(name: str, *, ok: bool, detail: str | None = None) -> Redir
 
 def _render_banner(query) -> str:
     status = query.get("status")
-    server = html.escape(query.get("server", ""))
-    if status == "ok":
-        return f'<p style="color:#0a0">✅ <code>{server}</code>: login successful.</p>'
-    if status == "fail":
+    if status in ("ok", "fail"):
+        server = html.escape(query.get("server", ""))
+        if status == "ok":
+            return f'<p style="color:#0a0">✅ <code>{server}</code>: login successful.</p>'
         detail = query.get("detail")
         extra = f" — {html.escape(detail)}" if detail else ""
         return f'<p style="color:#b00">⚠ <code>{server}</code>: login failed{extra}.</p>'
+    gw = query.get("gw")
+    if gw == "ok":
+        return '<p style="color:#0a0">✅ agent gateway restarted.</p>'
+    if gw == "fail":
+        detail = query.get("detail")
+        extra = f" — {html.escape(detail)}" if detail else ""
+        return f'<p style="color:#b00">⚠ gateway restart failed{extra}.</p>'
     return ""
 
 
-def _render_index(query) -> str:
+def _render_index(query, gateway_restart_enabled: bool = False) -> str:
     try:
         servers = hermes.oauth_servers()
     except Exception as exc:  # noqa: BLE001 - config read failed
@@ -200,6 +223,14 @@ def _render_index(query) -> str:
             f'<td><a href="{href}">{"re-auth" if present else "login"}</a></td></tr>'
         )
     body = "\n".join(rows) or '<tr><td colspan="3"><em>no OAuth MCP servers configured</em></td></tr>'
+    # POST form (not a link) so the state-changing restart can't be triggered by
+    # a cross-site GET / prefetch; pairs with the Sec-Fetch-Site guard.
+    gw_button = (
+        '<form method="post" action="/gateway/restart" style="margin-top:1em">'
+        '<button type="submit">Restart agent gateway</button>'
+        '<small> — needed once after a server\'s first login</small></form>'
+        if gateway_restart_enabled else ""
+    )
     return (
         "<!doctype html><meta charset=utf-8>"
         "<title>hermes-mcp-login</title>"
@@ -209,4 +240,5 @@ def _render_index(query) -> str:
         "<table cellpadding=6>"
         "<tr><th align=left>server</th><th align=left>status</th><th></th></tr>"
         f"{body}</table>"
+        f"{gw_button}"
     )

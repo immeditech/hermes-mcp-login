@@ -137,3 +137,72 @@ def test_callback_handler_couples_to_code_result():
         return await waiter
 
     assert asyncio.run(scenario()) == ("the-code", "st8")
+
+
+# --- gateway restart button ------------------------------------------------
+
+GW_SETTINGS = Settings(
+    public_base="https://agent.example.test", authorize_timeout=2.0,
+    gateway_restart_enabled=True, gateway_service="hermes-gateway.service",
+)
+
+
+@pytest.fixture
+def gw_client(monkeypatch):
+    monkeypatch.setattr(hermes, "oauth_servers", lambda: {"imcontact": {"auth": "oauth"}})
+    monkeypatch.setattr(hermes, "token_present", lambda name: True)
+    hermes.SESSIONS.clear()
+    return TestClient(create_app(GW_SETTINGS), follow_redirects=False)
+
+
+def test_restart_disabled_returns_404(client):
+    # default SETTINGS has gateway_restart_enabled=False
+    assert client.post("/gateway/restart").status_code == 404
+
+
+def test_restart_button_hidden_when_disabled(client):
+    assert "/gateway/restart" not in client.get("/").text
+
+
+def test_restart_button_shown_when_enabled(gw_client):
+    assert 'action="/gateway/restart"' in gw_client.get("/").text
+
+
+def test_restart_refuses_cross_site(gw_client, monkeypatch):
+    from hermes_mcp_login import control
+    called = []
+
+    async def fake(service, timeout):
+        called.append(service)
+        return True, ""
+
+    monkeypatch.setattr(control, "restart_gateway", fake)
+    resp = gw_client.post("/gateway/restart", headers={"sec-fetch-site": "cross-site"})
+    assert resp.status_code == 403
+    assert called == []
+
+
+def test_restart_ok_redirects(gw_client, monkeypatch):
+    from hermes_mcp_login import control
+
+    async def fake(service, timeout):
+        assert service == "hermes-gateway.service"
+        return True, ""
+
+    monkeypatch.setattr(control, "restart_gateway", fake)
+    resp = gw_client.post("/gateway/restart")
+    assert resp.status_code == 303
+    assert resp.headers["location"] == "/?gw=ok"
+
+
+def test_restart_failure_carries_detail(gw_client, monkeypatch):
+    from hermes_mcp_login import control
+
+    async def fake(service, timeout):
+        return False, "a sudo rule is required"
+
+    monkeypatch.setattr(control, "restart_gateway", fake)
+    resp = gw_client.post("/gateway/restart")
+    assert resp.status_code == 303
+    assert resp.headers["location"].startswith("/?gw=fail")
+    assert "sudo" in resp.headers["location"]

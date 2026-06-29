@@ -32,6 +32,13 @@ def _env_int(name: str, default: int) -> int:
         return default
 
 
+def _env_bool(name: str, default: bool) -> bool:
+    raw = os.environ.get(name)
+    if raw is None or raw == "":
+        return default
+    return raw.strip().lower() in ("1", "true", "yes", "on")
+
+
 @dataclass(frozen=True)
 class Settings:
     """Runtime settings, all sourced from ``HERMES_MCP_LOGIN_*`` env vars."""
@@ -56,6 +63,15 @@ class Settings:
     # before giving up (the OAuth discovery round-trip should be sub-second).
     authorize_timeout: float = 30.0
 
+    # Optional "restart agent gateway" button. The agent only re-probes an MCP
+    # server it gave up on at startup (e.g. a first login) after a gateway
+    # restart, so this saves an SSH round-trip. Requires a sudoers rule letting
+    # the service user run ``systemctl restart <gateway_service>`` — off by
+    # default since that privilege isn't always granted.
+    gateway_restart_enabled: bool = False
+    gateway_service: str = "hermes-gateway.service"
+    gateway_restart_timeout: float = 30.0
+
     @classmethod
     def from_env(cls) -> "Settings":
         return cls(
@@ -64,6 +80,11 @@ class Settings:
             port=_env_int("HERMES_MCP_LOGIN_PORT", 9120),
             callback_timeout=_env_float("HERMES_MCP_LOGIN_CALLBACK_TIMEOUT", 300.0),
             authorize_timeout=_env_float("HERMES_MCP_LOGIN_AUTHORIZE_TIMEOUT", 30.0),
+            gateway_restart_enabled=_env_bool("HERMES_MCP_LOGIN_GATEWAY_RESTART", False),
+            gateway_service=os.environ.get(
+                "HERMES_MCP_LOGIN_GATEWAY_SERVICE", "hermes-gateway.service"
+            ),
+            gateway_restart_timeout=_env_float("HERMES_MCP_LOGIN_GATEWAY_RESTART_TIMEOUT", 30.0),
         )
 
     def redirect_uri(self, name: str) -> str:

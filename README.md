@@ -59,6 +59,7 @@ The two OAuth handlers are coupled to the two HTTP requests by a pair of
 | `GET /mcp/<name>/login?force=true` | re-auth: wipe the stored token first, then log in (a valid token would otherwise short-circuit the flow) |
 | `GET /mcp/<name>/callback?code&state` | the registered `redirect_uri`; token exchange, `302` back to `/` |
 | `GET /mcp/<name>/status` | JSON `{ "token_present": bool }` |
+| `POST /gateway/restart` | optional — restart the agent gateway (`303` back to `/`). Only when `HERMES_MCP_LOGIN_GATEWAY_RESTART=true`; needs a sudoers rule. POST + Sec-Fetch-Site guarded. |
 
 ## Deployment model
 
